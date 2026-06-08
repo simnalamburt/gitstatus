@@ -11,12 +11,12 @@ gitstatus_version="v1.5.5"
 # If ./deps/libgit2-${libgit2_version}.tar.gz doesn't exist, build
 # downloads it from the following location:
 #
-#   https://github.com/romkatv/libgit2/archive/${libgit2_version}.tar.gz
+#   https://github.com/libgit2/libgit2/archive/${libgit2_version}.tar.gz
 #
 # Once downloaded, the tarball is stored at the path indicated
 # above so that repeated builds don't consume network bandwidth.
 #
 # If sha256 of ./deps/libgit2-${libgit2_version}.tar.gz doesn't match,
 # build gets aborted.
-libgit2_version="tag-2ecf33948a4df9ef45a66c68b8ef24a5e60eaac6"
-libgit2_sha256="4ce11d71ee576dbbc410b9fa33a9642809cc1fa687b315f7c23eeb825b251e93"
+libgit2_version="44c05e5d12f2b8b86b9730bb50f27daf74143782"
+libgit2_sha256="5217ab829229b8435970a76a41e17ba5538926d7cd6cb95a948e761dea72e3c0"

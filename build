@@ -323,7 +323,7 @@ if [ ! -e "$libgit2_tarball" ]; then
         exit 1
       fi
     fi
-    libgit2_url=https://github.com/romkatv/libgit2/archive/"$libgit2_version".tar.gz
+    libgit2_url=https://github.com/libgit2/libgit2/archive/"$libgit2_version".tar.gz
     if ! >"$libgit2_tmp" command wget --no-config -qO- -- "$libgit2_url" &&
        ! >"$libgit2_tmp" command wget             -qO- -- "$libgit2_url"; then
       set -x

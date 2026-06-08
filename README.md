@@ -464,17 +464,6 @@ Once the difference between the index and the workdir is found, we have a list o
 files that may be unstaged or untracked. To make the final judgement, these files need to be checked
 against `.gitignore` rules and a few other things.
 
-gitstatusd uses [patched libgit2](https://github.com/romkatv/libgit2) for this step. This fork
-adds several optimizations that make libgit2 faster. The patched libgit2 performs more than twice
-as fast in the benchmark as the original even without changes in the user code (that is, in the
-code that uses the libgit2 APIs). The fork also adds several API extensions, most notable of which
-is the support for multi-threaded scans. If `lg2 status` is modified to take advantage of these
-extensions, it outperforms the original libgit2 by a factor of 18. Lastly, the fork fixes a score of
-bugs, most of which become apparent only when using libgit2 from multiple threads.
-
-_WARNING: Changes to libgit2 are extensive but the testing they underwent isn't. It is
-**not recommended** to use the patched libgit2 in production._
-
 ## Requirements
 
 * To compile: binutils, cmake, gcc, g++, git and GNU make.
