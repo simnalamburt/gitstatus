@@ -75,6 +75,10 @@ T Exchange(std::atomic<T>& x, T v) {
   return x.exchange(v, std::memory_order_relaxed);
 }
 
+bool IndexIsCaseSensitive(git_index* index) {
+  return !(git_index_caps(index) & GIT_INDEX_CAPABILITY_IGNORE_CASE);
+}
+
 const char* DeltaStr(git_delta_t t) {
   switch (t) {
     case GIT_DELTA_UNMODIFIED: return "unmodified";
@@ -145,12 +149,9 @@ IndexStats Repo::GetIndexStats(const git_oid* head, git_config* cfg) {
   }
 
   if (git_index_) {
-    int new_index;
-    VERIFY(!git_index_read_ex(git_index_, 0, &new_index)) << GitError();
-    if (new_index) {
-      head_ = {};
-      index_.reset();
-    }
+    VERIFY(!git_index_read(git_index_, 0)) << GitError();
+    head_ = {};
+    index_.reset();
   } else {
     VERIFY(!git_repository_index(&git_index_, repo_)) << GitError();
     // Query an attribute (doesn't matter which) to initialize repo's attribute
@@ -198,7 +199,7 @@ IndexStats Repo::GetIndexStats(const git_oid* head, git_config* cfg) {
     size_t skip_worktree = 0;
     size_t assume_unchanged = 0;
     for (size_t i = 0; i != index_size; ++i) {
-      const git_index_entry* entry = git_index_get_byindex_no_sort(git_index_, i);
+      const git_index_entry* entry = git_index_get_byindex(git_index_, i);
       if (!(entry->flags_extended & GIT_INDEX_ENTRY_INTENT_TO_ADD)) ++staged;
       if (entry->flags_extended & GIT_INDEX_ENTRY_SKIP_WORKTREE) ++skip_worktree;
       if (entry->flags & GIT_INDEX_ENTRY_VALID) ++assume_unchanged;
@@ -259,8 +260,8 @@ int Repo::OnDelta(const char* type, const git_diff_delta& d, std::atomic<size_t>
   } else {
     LOG(INFO) << Msg();
   }
-  if (v + 1 < m1) return GIT_DIFF_DELTA_DO_NOT_INSERT;
-  if (Load(c2) < m2) return GIT_DIFF_DELTA_DO_NOT_INSERT | GIT_DIFF_DELTA_SKIP_TYPE;
+  if (v + 1 < m1) return 1;
+  if (Load(c2) < m2) return 1;
   return GIT_EUSER;
 }
 
@@ -270,7 +271,7 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
   git_diff_options opt = GIT_DIFF_OPTIONS_INIT;
   opt.payload = this;
   opt.flags = GIT_DIFF_INCLUDE_TYPECHANGE_TREES | GIT_DIFF_SKIP_BINARY_CHECK |
-              GIT_DIFF_DISABLE_PATHSPEC_MATCH | GIT_DIFF_EXEMPLARS;
+              GIT_DIFF_DISABLE_PATHSPEC_MATCH;
   if (lim_.max_num_untracked) {
     opt.flags |= GIT_DIFF_INCLUDE_UNTRACKED;
     if (lim_.recurse_untracked_dirs) opt.flags |= GIT_DIFF_RECURSE_UNTRACKED_DIRS;
@@ -280,7 +281,7 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
   opt.ignore_submodules = GIT_SUBMODULE_IGNORE_DIRTY;
   opt.notify_cb = +[](const git_diff* diff, const git_diff_delta* delta,
                       const char* matched_pathspec, void* payload) -> int {
-    if (delta->status == GIT_DELTA_CONFLICTED) return GIT_DIFF_DELTA_DO_NOT_INSERT;
+    if (delta->status == GIT_DELTA_CONFLICTED) return 1;
     Repo* repo = static_cast<Repo*>(payload);
     if (Load(repo->error_)) return GIT_EUSER;
     if (delta->status == GIT_DELTA_UNTRACKED) {
@@ -293,22 +294,22 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
     }
   };
 
-  const Str<> str(git_index_is_case_sensitive(git_index_));
+  const Str<> str(IndexIsCaseSensitive(git_index_));
   auto shard = shards_.begin();
   for (auto p = paths.begin(); p != paths.end();) {
-    opt.range_start = *p;
-    opt.range_end = *p;
+    const char* range_start = *p;
+    const char* range_end = *p;
     opt.pathspec.strings = const_cast<char**>(&*p);
     opt.pathspec.count = 1;
     while (!shard->Contains(str, StringView(*p))) ++shard;
     while (++p != paths.end() && shard->Contains(str, StringView(*p))) {
-      opt.range_end = *p;
+      range_end = *p;
       ++opt.pathspec.count;
     }
-    RunAsync([this, opt]() {
+    RunAsync([this, opt, range_start, range_end]() {
       git_diff* diff = nullptr;
-      LOG(DEBUG) << "git_diff_index_to_workdir from " << Print(opt.range_start) << " to "
-                 << Print(opt.range_end);
+      LOG(DEBUG) << "git_diff_index_to_workdir from " << Print(range_start) << " to "
+                 << Print(range_end);
       switch (git_diff_index_to_workdir(&diff, repo_, git_index_, &opt)) {
         case 0:
           git_diff_free(diff);
@@ -331,7 +332,7 @@ void Repo::StartStagedScan(const git_oid* head) {
   VERIFY(!git_commit_tree(&tree, commit)) << GitError();
 
   git_diff_options opt = GIT_DIFF_OPTIONS_INIT;
-  opt.flags = GIT_DIFF_EXEMPLARS | GIT_DIFF_INCLUDE_TYPECHANGE_TREES;
+  opt.flags = GIT_DIFF_INCLUDE_TYPECHANGE_TREES;
   opt.payload = this;
   opt.notify_cb = +[](const git_diff* diff, const git_diff_delta* delta,
                       const char* matched_pathspec, void* payload) -> int {
@@ -348,40 +349,43 @@ void Repo::StartStagedScan(const git_oid* head) {
     }
   };
 
-  for (const Shard& shard : shards_) {
-    RunAsync([this, tree, opt, shard]() mutable {
-      size_t skip_worktree = 0;
-      size_t assume_unchanged = 0;
-      for (size_t i = shard.start_i; i != shard.end_i; ++i) {
-        const git_index_entry* entry = git_index_get_byindex_no_sort(git_index_, i);
-        if (entry->flags_extended & GIT_INDEX_ENTRY_SKIP_WORKTREE) ++skip_worktree;
-        if (entry->flags & GIT_INDEX_ENTRY_VALID) ++assume_unchanged;
-      }
-      Inc(skip_worktree_, skip_worktree);
-      Inc(assume_unchanged_, assume_unchanged);
-      opt.range_start = shard.start_s.c_str();
-      opt.range_end = shard.end_s.c_str();
-      git_diff* diff = nullptr;
-      LOG(DEBUG) << "git_diff_tree_to_index from " << Print(opt.range_start) << " to "
-                 << Print(opt.range_end);
-      switch (git_diff_tree_to_index(&diff, repo_, tree, git_index_, &opt)) {
-        case 0:
-          git_diff_free(diff);
-          break;
-        case GIT_EUSER:
-          break;
-        default:
-          LOG(ERROR) << "git_diff_tree_to_index: " << GitError();
-          throw Exception();
-      }
-    });
+  size_t skip_worktree = 0;
+  size_t assume_unchanged = 0;
+  size_t index_size = git_index_entrycount(git_index_);
+  for (size_t i = 0; i != index_size; ++i) {
+    const git_index_entry* entry = git_index_get_byindex(git_index_, i);
+    if (entry->flags_extended & GIT_INDEX_ENTRY_SKIP_WORKTREE) ++skip_worktree;
+    if (entry->flags & GIT_INDEX_ENTRY_VALID) ++assume_unchanged;
   }
+  Inc(skip_worktree_, skip_worktree);
+  Inc(assume_unchanged_, assume_unchanged);
+
+  bool scheduled = false;
+  ON_SCOPE_EXIT(&) {
+    if (!scheduled) git_tree_free(tree);
+  };
+  RunAsync([this, tree, opt]() mutable {
+    ON_SCOPE_EXIT(=) { git_tree_free(tree); };
+    git_diff* diff = nullptr;
+    LOG(DEBUG) << "git_diff_tree_to_index";
+    switch (git_diff_tree_to_index(&diff, repo_, tree, git_index_, &opt)) {
+      case 0:
+        git_diff_free(diff);
+        break;
+      case GIT_EUSER:
+        break;
+      default:
+        LOG(ERROR) << "git_diff_tree_to_index: " << GitError();
+        throw Exception();
+    }
+  });
+  scheduled = true;
 }
 
 void Repo::UpdateShards() {
   constexpr size_t kEntriesPerShard = 512;
 
-  const Str<> str(git_index_is_case_sensitive(git_index_));
+  const Str<> str(IndexIsCaseSensitive(git_index_));
   size_t index_size = git_index_entrycount(git_index_);
   ON_SCOPE_EXIT(&) {
     LOG(INFO) << "Splitting " << index_size << " object(s) into " << shards_.size() << " shard(s)";
@@ -405,7 +409,7 @@ void Repo::UpdateShards() {
 
   for (size_t i = 0; i != shards - 1; ++i) {
     size_t idx = (i + 1) * index_size / shards;
-    std::string split = git_index_get_byindex_no_sort(git_index_, idx)->path;
+    std::string split = git_index_get_byindex(git_index_, idx)->path;
     auto pos = split.find_last_of('/');
     if (pos == std::string::npos) continue;
     split = split.substr(0, pos + 1);
@@ -434,7 +438,7 @@ void Repo::UpdateShards() {
   CHECK(shards_.back().end_i == index_size);
   for (size_t i = 0; i != shards_.size(); ++i) {
     if (i) {
-      const git_index_entry* entry = git_index_get_byindex_no_sort(git_index_, shards_[i].start_i);
+      const git_index_entry* entry = git_index_get_byindex(git_index_, shards_[i].start_i);
       CHECK(!std::memcmp(shards_[i].start_s.c_str(), entry->path, shards_[i].start_s.size()));
       CHECK(str.Lt(shards_[i - 1].end_s, shards_[i].start_s));
       CHECK(shards_[i - 1].end_i == shards_[i].start_i);

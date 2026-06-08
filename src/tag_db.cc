@@ -296,16 +296,17 @@ bool TagDb::TagHasTarget(const char* name, const git_oid* target) const {
   static constexpr size_t kMaxDerefCount = 10;
 
   git_reference* ref;
-  if (git_refdb_lookup(&ref, refdb_, name)) return false;
+  if (git_reference_lookup(&ref, repo_, name)) return false;
   ON_SCOPE_EXIT(&) { git_reference_free(ref); };
 
   for (int i = 0; i != kMaxDerefCount && git_reference_type(ref) == GIT_REFERENCE_SYMBOLIC; ++i) {
     git_reference* dst;
-    const char* ref_name = git_reference_name(ref);
-    if (git_refdb_lookup(&dst, refdb_, ref_name)) {
-      const char* tag_name = StripTag(ref_name);
+    const char* ref_name = git_reference_symbolic_target(ref);
+    if (!ref_name || git_reference_lookup(&dst, repo_, ref_name)) {
+      const char* tag_name = ref_name ? StripTag(ref_name) : nullptr;
+      if (!tag_name) return false;
       auto it = std::lower_bound(name2id_.begin(), name2id_.end(), tag_name, ByName);
-      return it != name2id_.end() && !strcmp((*it)->name, tag_name) && !IsLooseTag(tag_name) &&
+      return it != name2id_.end() && !std::strcmp((*it)->name, tag_name) && !IsLooseTag(tag_name) &&
              git_oid_equal(&(*it)->id, target);
     }
     git_reference_free(ref);

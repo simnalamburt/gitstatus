@@ -40,6 +40,28 @@ const char* GitError() {
   return err && err->message ? err->message : "unknown error";
 }
 
+namespace {
+
+static constexpr char kHeadsPrefix[] = "refs/heads/";
+
+bool IsLocalBranch(const char* refname) {
+  return refname && !std::strncmp(refname, kHeadsPrefix, sizeof(kHeadsPrefix) - 1);
+}
+
+const git_refspec* MatchingFetchRefspec(git_remote* remote, const char* refname) {
+  size_t n = git_remote_refspec_count(remote);
+  for (size_t i = 0; i != n; ++i) {
+    const git_refspec* refspec = git_remote_get_refspec(remote, i);
+    if (git_refspec_direction(refspec) == GIT_DIRECTION_FETCH &&
+        git_refspec_src_matches(refspec, refname)) {
+      return refspec;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 std::string RepoState(git_repository* repo) {
   Arena arena;
   StringView gitdir(git_repository_path(repo));
@@ -187,23 +209,23 @@ const char* LocalBranchName(const git_reference* ref) {
 }
 
 RemotePtr GetRemote(git_repository* repo, const git_reference* local) {
-  git_remote* remote;
-  git_buf symref = {};
-  if (git_branch_remote(&remote, &symref, repo, git_reference_name(local))) return nullptr;
-  ON_SCOPE_EXIT(&) {
-    git_remote_free(remote);
-    git_buf_free(&symref);
-  };
-
   git_reference* ref;
-  if (git_reference_lookup(&ref, repo, symref.ptr)) return nullptr;
+  if (git_branch_upstream(&ref, local)) return nullptr;
   ON_SCOPE_EXIT(&) { if (ref) git_reference_free(ref); };
 
+  git_buf remote_name = {};
+  if (git_branch_upstream_remote(&remote_name, repo, git_reference_name(local))) return nullptr;
+  ON_SCOPE_EXIT(&) { git_buf_dispose(&remote_name); };
+
+  std::string name = remote_name.ptr ? remote_name.ptr : ".";
+  git_remote* remote = nullptr;
+  if (name != ".") (void)git_remote_lookup(&remote, repo, name.c_str());
+  ON_SCOPE_EXIT(&) { git_remote_free(remote); };
+
   const char* branch = nullptr;
-  std::string name = remote ? git_remote_name(remote) : ".";
   if (git_branch_name(&branch, ref)) {
     branch = "";
-  } else if (remote) {
+  } else if (name != ".") {
     VERIFY(std::strstr(branch, name.c_str()) == branch);
     VERIFY(branch[name.size()] == '/');
     branch += name.size() + 1;
@@ -218,19 +240,49 @@ RemotePtr GetRemote(git_repository* repo, const git_reference* local) {
 }
 
 PushRemotePtr GetPushRemote(git_repository* repo, const git_reference* local) {
-  git_remote* remote;
-  git_buf symref = {};
-  if (git_branch_push_remote(&remote, &symref, repo, git_reference_name(local))) return nullptr;
-  ON_SCOPE_EXIT(&) {
-    git_remote_free(remote);
-    git_buf_free(&symref);
-  };
+  const char* refname = git_reference_name(local);
+  if (!IsLocalBranch(refname)) return nullptr;
+
+  git_config* cfg;
+  if (git_repository_config(&cfg, repo)) return nullptr;
+  ON_SCOPE_EXIT(=) { git_config_free(cfg); };
+
+  git_buf remote_name = {};
+  ON_SCOPE_EXIT(&) { git_buf_dispose(&remote_name); };
+  std::string key = "branch.";
+  key += refname + sizeof(kHeadsPrefix) - 1;
+  key += ".pushremote";
+  if (git_config_get_string_buf(&remote_name, cfg, key.c_str()) &&
+      git_config_get_string_buf(&remote_name, cfg, "remote.pushdefault")) {
+    return nullptr;
+  }
+  if (!remote_name.size) return nullptr;
+
+  std::string name(remote_name.ptr, remote_name.size);
+  std::string symref;
+  git_remote* remote = nullptr;
+  if (name == ".") {
+    symref = refname;
+  } else {
+    if (git_remote_lookup(&remote, repo, name.c_str())) return nullptr;
+    const git_refspec* refspec = MatchingFetchRefspec(remote, refname);
+    if (!refspec) {
+      git_remote_free(remote);
+      return nullptr;
+    }
+    git_buf buf = {};
+    ON_SCOPE_EXIT(&) { git_buf_dispose(&buf); };
+    if (git_refspec_transform(&buf, refspec, refname)) {
+      git_remote_free(remote);
+      return nullptr;
+    }
+    symref.assign(buf.ptr, buf.size);
+  }
+  ON_SCOPE_EXIT(&) { git_remote_free(remote); };
 
   git_reference* ref;
-  if (git_reference_lookup(&ref, repo, symref.ptr)) return nullptr;
+  if (git_reference_lookup(&ref, repo, symref.c_str())) return nullptr;
   ON_SCOPE_EXIT(&) { if (ref) git_reference_free(ref); };
-
-  std::string name = remote ? git_remote_name(remote) : ".";
 
   auto res = std::make_unique<PushRemote>();
   res->name = std::move(name);

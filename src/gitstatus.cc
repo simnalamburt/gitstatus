@@ -54,9 +54,8 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   if (!repo) return;
 
   git_config* cfg;
-  VERIFY(!git_repository_config(&cfg, repo->repo())) << GitError();
+  VERIFY(!git_repository_config_snapshot(&cfg, repo->repo())) << GitError();
   ON_SCOPE_EXIT(=) { git_config_free(cfg); };
-  VERIFY(!git_config_refresh(cfg)) << GitError();
 
   // Symbolic reference if and only if the repo is empty.
   git_reference* head = Head(repo->repo());
@@ -189,9 +188,6 @@ int GitStatus(int argc, char** argv) {
 
   InitGlobalThreadPool(opts.num_threads);
   git_libgit2_opts(GIT_OPT_ENABLE_STRICT_HASH_VERIFICATION, 0);
-  git_libgit2_opts(GIT_OPT_DISABLE_INDEX_CHECKSUM_VERIFICATION, 1);
-  git_libgit2_opts(GIT_OPT_DISABLE_INDEX_FILEPATH_VALIDATION, 1);
-  git_libgit2_opts(GIT_OPT_DISABLE_READNG_PACKED_TAGS, 1);
   git_libgit2_init();
 
   while (true) {

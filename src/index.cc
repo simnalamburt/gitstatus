@@ -306,10 +306,17 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
 }  // namespace
 
 RepoCaps::RepoCaps(git_repository* repo, git_index* index) {
-  trust_filemode = git_index_is_filemode_trustworthy(index);
-  has_symlinks = git_index_supports_symlinks(index);
-  case_sensitive = git_index_is_case_sensitive(index);
-  precompose_unicode = git_index_precompose_unicode(index);
+  int index_caps = git_index_caps(index);
+  trust_filemode = !(index_caps & GIT_INDEX_CAPABILITY_NO_FILEMODE);
+  has_symlinks = !(index_caps & GIT_INDEX_CAPABILITY_NO_SYMLINKS);
+  case_sensitive = !(index_caps & GIT_INDEX_CAPABILITY_IGNORE_CASE);
+  precompose_unicode = false;
+  git_config* cfg;
+  if (!git_repository_config_snapshot(&cfg, repo)) {
+    ON_SCOPE_EXIT(=) { git_config_free(cfg); };
+    int val;
+    if (!git_config_get_bool(&val, cfg, "core.precomposeunicode")) precompose_unicode = val;
+  }
   LOG(DEBUG) << "Repository capabilities for " << Print(git_repository_workdir(repo)) << ": "
              << "is_filemode_trustworthy = " << std::boolalpha << trust_filemode << ", "
              << "index_supports_symlinks = " << std::boolalpha << has_symlinks << ", "
@@ -328,7 +335,7 @@ Index::Index(git_repository* repo, git_index* index)
 }
 
 size_t Index::InitDirs(git_index* index) {
-  const Str<> str(git_index_is_case_sensitive(index));
+  const Str<> str(caps_.case_sensitive);
   const size_t index_size = git_index_entrycount(index);
   dirs_.reserve(index_size / 8);
   std::stack<IndexDir*> stack;
@@ -348,7 +355,7 @@ size_t Index::InitDirs(git_index* index) {
   };
 
   for (size_t i = 0; i != index_size; ++i) {
-    const git_index_entry* entry = git_index_get_byindex_no_sort(index, i);
+    const git_index_entry* entry = git_index_get_byindex(index, i);
     IndexDir* prev = stack.top();
     size_t common_len, common_depth;
     CommonDir(str, prev->path.ptr, entry->path, &common_len, &common_depth);
@@ -447,7 +454,7 @@ std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts) {
   }
 
   VERIFY(!error);
-  StrSort(res.begin(), res.end(), git_index_is_case_sensitive(git_index_));
+  StrSort(res.begin(), res.end(), caps_.case_sensitive);
   auto StrEq = [](const char* a, const char* b) { return !strcmp(a, b); };
   res.erase(std::unique(res.begin(), res.end(), StrEq), res.end());
   return res;
