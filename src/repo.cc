@@ -285,6 +285,14 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
     Repo* repo = static_cast<Repo*>(payload);
     if (Load(repo->error_)) return GIT_EUSER;
     if (delta->status == GIT_DELTA_UNTRACKED) {
+      // Upstream libgit2 notifies about an untracked directory before checking whether
+      // it contains anything non-ignored; deltas for empty and ignored-only directories
+      // are discarded after this callback runs. Returning 0 lets libgit2 keep directory
+      // deltas (and perform that check); the survivors are counted after the diff
+      // completes in StartDirtyScan.
+      const char* path = delta->new_file.path;
+      size_t len = std::strlen(path);
+      if (len && path[len - 1] == '/') return 0;
       return repo->OnDelta("untracked", *delta, repo->untracked_, repo->lim_.max_num_untracked,
                            repo->unstaged_, repo->lim_.max_num_unstaged);
     } else {
@@ -312,6 +320,16 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
                  << Print(range_end);
       switch (git_diff_index_to_workdir(&diff, repo_, git_index_, &opt)) {
         case 0:
+          // The only deltas the notify callback lets libgit2 insert are untracked
+          // directories; those that survived are non-empty and contain something
+          // that is not ignored. Count them here.
+          for (size_t i = 0, n = git_diff_num_deltas(diff); i != n; ++i) {
+            const git_diff_delta* d = git_diff_get_delta(diff, i);
+            if (d->status == GIT_DELTA_UNTRACKED) {
+              OnDelta("untracked", *d, untracked_, lim_.max_num_untracked, unstaged_,
+                      lim_.max_num_unstaged);
+            }
+          }
           git_diff_free(diff);
           break;
         case GIT_EUSER:

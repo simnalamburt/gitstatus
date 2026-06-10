@@ -175,6 +175,18 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
 
     auto Basename = [&](const git_index_entry* e) { return e->path + dir.path.len; };
 
+    // Pathspec under which a new (untracked) entry of this directory is reported to
+    // git_diff_index_to_workdir. A bare file path doesn't work with upstream libgit2:
+    // with GIT_DIFF_DISABLE_PATHSPEC_MATCH the pathspec filters tracked siblings out
+    // of the index iterator, the enclosing directory then looks like an untracked
+    // tree whose path doesn't literally match the pathspec, and the diff skips the
+    // whole directory without descending into it. The enclosing directory always has
+    // tracked entries in the index, so passing the directory itself as the pathspec
+    // keeps the index iterator populated and makes the diff descend.
+    auto NewCandidatePath = [&](const char* path) {
+      return dir.path.len ? dir.pathspec : path;
+    };
+
     auto AddUnmached = [&](StringView basename) {
       if (!basename.len) {
         dir.st = {};
@@ -185,7 +197,7 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
       }
       char* path = dir.arena.StrCat(dir.path, basename);
       dir.unmatched.push_back(path);
-      AddCandidate(basename.len ? "new" : "unreadable", path);
+      AddCandidate(basename.len ? "new" : "unreadable", basename.len ? NewCandidatePath(path) : path);
     };
 
     auto StatFiles = [&]() {
@@ -236,7 +248,7 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
       }
       if (opts.untracked_cache == Tribool::kTrue && StatEq(st, dir.st)) {
         StatFiles();
-        for (const char* path : dir.unmatched) AddCandidate("new", path);
+        for (const char* path : dir.unmatched) AddCandidate("new", NewCandidatePath(path));
         continue;
       }
       dir.st = st;
@@ -369,6 +381,7 @@ size_t Index::InitDirs(git_index* index) {
       top->subdirs.push_back(subdir);
       IndexDir* dir = arena_.DirectInit<IndexDir>(&arena_);
       dir->path = StringView(entry->path, p - entry->path + 1);
+      dir->pathspec = arena_.StrDup(dir->path);
       dir->basename = subdir;
       dir->depth = stack.size();
       CHECK(dir->path.ptr[dir->path.len - 1] == '/');
@@ -457,6 +470,20 @@ std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts) {
   StrSort(res.begin(), res.end(), caps_.case_sensitive);
   auto StrEq = [](const char* a, const char* b) { return !strcmp(a, b); };
   res.erase(std::unique(res.begin(), res.end(), StrEq), res.end());
+  // A directory candidate covers everything under it. Drop candidates contained
+  // within a preceding directory candidate so that no path is diffed -- and hence
+  // counted -- twice when candidates end up in different git_diff_index_to_workdir
+  // calls (see Repo::StartDirtyScan).
+  auto Contains = [&](const char* dir, const char* path) {
+    size_t len = std::strlen(dir);
+    if (!len || dir[len - 1] != '/') return false;
+    return caps_.case_sensitive ? !std::strncmp(path, dir, len) : !strncasecmp(path, dir, len);
+  };
+  size_t n = 0;
+  for (const char* path : res) {
+    if (!n || !Contains(res[n - 1], path)) res[n++] = path;
+  }
+  res.resize(n);
   return res;
 }
 

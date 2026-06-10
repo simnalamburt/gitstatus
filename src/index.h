@@ -52,6 +52,9 @@ struct IndexDir {
 
   StringView path;
   StringView basename;
+  // Null-terminated copy of `path`; used as a pathspec for git_diff_index_to_workdir
+  // when reporting new (untracked) entries found in this directory. See ScanDirs.
+  const char* pathspec = nullptr;
   size_t depth = 0;
   struct stat st = {};
   WithArena<std::vector<const git_index_entry*>> files;
