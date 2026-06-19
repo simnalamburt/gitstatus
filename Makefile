@@ -12,7 +12,8 @@ VERSION ?= $(shell . ./build.info && printf "%s" "$$gitstatus_version")
 # missing in macOS prior to 10.13.
 CXXFLAGS += -std=c++14 -funsigned-char -O3 -DNDEBUG -DGITSTATUS_VERSION=$(VERSION) # -Wall -g -fsanitize=thread
 LDFLAGS += -pthread # -fsanitize=thread
-LDLIBS += -lgit2 # -lprofiler -lunwind
+GITSTATUS_LIBGIT2_LDLIB ?= -lgit2
+LDLIBS += $(GITSTATUS_LIBGIT2_LDLIB) # -lprofiler -lunwind
 
 SRCS := $(shell find src -name "*.cc")
 OBJS := $(patsubst src/%.cc, $(OBJDIR)/%.o, $(SRCS))

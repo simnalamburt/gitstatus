@@ -222,12 +222,13 @@ if [ "$gitstatus_cpu" = x86-64 ]; then
   cflags="$cflags -mtune=generic"
 fi
 
-libgit2_cmake_flags=
+libgit2_cmake_flags="-DEXPERIMENTAL_SHA256=ON"
 libgit2_cflags="${CFLAGS-} $cflags -O3 -DNDEBUG"
 
 gitstatus_cxx=g++
-gitstatus_cxxflags="${CXXFLAGS-} $cflags -I${workdir}/libgit2/include -DGITSTATUS_ZERO_NSEC -D_GNU_SOURCE -D_GLIBCXX_ASSERTIONS"
+gitstatus_cxxflags="${CXXFLAGS-} $cflags -I${workdir}/libgit2/include -DGIT_EXPERIMENTAL_SHA256=1 -DGITSTATUS_ZERO_NSEC -D_GNU_SOURCE -D_GLIBCXX_ASSERTIONS"
 gitstatus_ldflags="${LDFLAGS-} $ldflags -L${workdir}/libgit2/build"
+gitstatus_libgit2_ldlib=-lgit2-experimental
 gitstatus_ldlibs=
 gitstatus_make=make
 
@@ -404,6 +405,7 @@ APPNAME="$appname".tmp           \
   CXX="${CXX:-$gitstatus_cxx}"   \
   CXXFLAGS="$gitstatus_cxxflags" \
   LDFLAGS="$gitstatus_ldflags"   \
+  GITSTATUS_LIBGIT2_LDLIB="$gitstatus_libgit2_ldlib" \
   LDLIBS="$gitstatus_ldlibs"     \
   command "$gitstatus_make" -C "$outdir" -j "$cpus"
 

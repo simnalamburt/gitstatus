@@ -59,6 +59,9 @@ class TagDb {
 
   git_repository* const repo_;
   git_refdb* const refdb_;
+  const git_oid_t oid_type_;
+  const size_t oid_raw_size_;
+  const size_t oid_hex_size_;
 
   Arena pack_arena_;
   struct stat pack_stat_ = {};

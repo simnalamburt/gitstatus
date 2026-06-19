@@ -56,17 +56,19 @@ constexpr int8_t kUnhex[256] = {
     0, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0   // 6
 };
 
-struct {
+struct ById {
+  size_t raw_size;
+
   bool operator()(const Tag* x, const git_oid& y) const {
-    return std::memcmp(x->id.id, y.id, GIT_OID_RAWSZ) < 0;
+    return std::memcmp(x->id.id, y.id, raw_size) < 0;
   }
   bool operator()(const git_oid& x, const Tag* y) const {
-    return std::memcmp(x.id, y->id.id, GIT_OID_RAWSZ) < 0;
+    return std::memcmp(x.id, y->id.id, raw_size) < 0;
   }
   bool operator()(const Tag* x, const Tag* y) const {
-    return std::memcmp(x->id.id, y->id.id, GIT_OID_RAWSZ) < 0;
+    return std::memcmp(x->id.id, y->id.id, raw_size) < 0;
   }
-} constexpr ById = {};
+};
 
 struct {
   bool operator()(const Tag* x, const char* y) const {
@@ -80,10 +82,43 @@ struct {
   }
 } constexpr ByName = {};
 
-void ParseOid(unsigned char* oid, const char* begin, const char* end) {
-  VERIFY(end >= begin + GIT_OID_HEXSZ);
-  for (size_t i = 0; i != GIT_OID_HEXSZ; i += 2) {
-    *oid++ = kUnhex[+begin[i]] << 4 | kUnhex[+begin[i + 1]];
+size_t OidRawSize(git_oid_t type) {
+  switch (type) {
+    case GIT_OID_SHA1:
+      return GIT_OID_SHA1_SIZE;
+#ifdef GIT_EXPERIMENTAL_SHA256
+    case GIT_OID_SHA256:
+      return GIT_OID_SHA256_SIZE;
+#endif
+  }
+  LOG(ERROR) << "Unsupported object format: " << type;
+  throw Exception();
+}
+
+size_t OidHexSize(git_oid_t type) {
+  switch (type) {
+    case GIT_OID_SHA1:
+      return GIT_OID_SHA1_HEXSIZE;
+#ifdef GIT_EXPERIMENTAL_SHA256
+    case GIT_OID_SHA256:
+      return GIT_OID_SHA256_HEXSIZE;
+#endif
+  }
+  LOG(ERROR) << "Unsupported object format: " << type;
+  throw Exception();
+}
+
+void ParseOid(git_oid* oid, git_oid_t type, size_t hex_size, const char* begin, const char* end) {
+  VERIFY(end >= begin + hex_size);
+  std::memset(oid, 0, sizeof(*oid));
+#ifdef GIT_EXPERIMENTAL_SHA256
+  oid->type = type;
+#else
+  (void)type;
+#endif
+  unsigned char* out = oid->id;
+  for (size_t i = 0; i != hex_size; i += 2) {
+    *out++ = kUnhex[+begin[i]] << 4 | kUnhex[+begin[i + 1]];
   }
 }
 
@@ -105,6 +140,9 @@ git_refdb* RefDb(git_repository* repo) {
 TagDb::TagDb(git_repository* repo)
     : repo_(repo),
       refdb_(RefDb(repo)),
+      oid_type_(git_repository_oid_type(repo)),
+      oid_raw_size_(OidRawSize(oid_type_)),
+      oid_hex_size_(OidHexSize(oid_type_)),
       pack_(&pack_arena_),
       name2id_(&pack_arena_),
       id2name_(&pack_arena_) {
@@ -130,15 +168,21 @@ std::string TagDb::TagForCommit(const git_oid& oid) {
     if (res < tag && TagHasTarget(ref.c_str(), &oid)) res = tag;
   }
 
-  if ((std::unique_lock<std::mutex>(mutex_), id2name_dirty_)) {
+  bool id2name_dirty;
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    id2name_dirty = id2name_dirty_;
+  }
+
+  if (id2name_dirty) {
     for (auto it = name2id_.rbegin(); it != name2id_.rend(); ++it) {
-      if (!memcmp((*it)->id.id, oid.id, GIT_OID_RAWSZ) && !IsLooseTag((*it)->name)) {
+      if (!memcmp((*it)->id.id, oid.id, oid_raw_size_) && !IsLooseTag((*it)->name)) {
         if (res < (*it)->name) res = (*it)->name;
         break;
       }
     }
   } else {
-    auto r = std::equal_range(id2name_.begin(), id2name_.end(), oid, ById);
+    auto r = std::equal_range(id2name_.begin(), id2name_.end(), oid, ById{oid_raw_size_});
     for (auto it = r.first; it != r.second; ++it) {
       if (!IsLooseTag((*it)->name) && res < (*it)->name) res = (*it)->name;
     }
@@ -246,16 +290,16 @@ void TagDb::ParsePack() {
 
   while (p != e) {
     Tag* tag = pack_arena_.Allocate<Tag>();
-    ParseOid(tag->id.id, p, e);
-    p += GIT_OID_HEXSZ;
+    ParseOid(&tag->id, oid_type_, oid_hex_size_, p, e);
+    p += oid_hex_size_;
     VERIFY(*p++ == ' ');
     const char* ref = p;
     VERIFY(p = std::strchr(p, '\n'));
     p[p[-1] == '\r' ? -1 : 0] = 0;
     ++p;
     if (*p == '^') {
-      ParseOid(tag->id.id, p + 1, e);
-      p += GIT_OID_HEXSZ + 1;
+      ParseOid(&tag->id, oid_type_, oid_hex_size_, p + 1, e);
+      p += oid_hex_size_ + 1;
       if (p != e) {
         VERIFY((p = std::strchr(p, '\n')));
         ++p;
@@ -274,7 +318,7 @@ void TagDb::ParsePack() {
 
   id2name_dirty_ = true;
   GlobalThreadPool()->Schedule([this] {
-    std::sort(id2name_.begin(), id2name_.end(), ById);
+    std::sort(id2name_.begin(), id2name_.end(), ById{oid_raw_size_});
     std::unique_lock<std::mutex> lock(mutex_);
     CHECK(id2name_dirty_);
     id2name_dirty_ = false;
